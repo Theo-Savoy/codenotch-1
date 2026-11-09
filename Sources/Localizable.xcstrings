@@ -73426,6 +73426,61 @@
           }
         }
       }
+    },
+    "Monthly Vibe Code": {
+      "extractionState": "manual",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vibe Code mensuel"
+          }
+        }
+      }
+    },
+    "No Vibe Code allowance on this account": {
+      "extractionState": "manual",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucun quota Vibe Code sur ce compte"
+          }
+        }
+      }
+    },
+    "Your Mistral role can't see the organization's Vibe usage": {
+      "extractionState": "manual",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Votre rôle Mistral ne permet pas de voir l'usage Vibe de l'organisation"
+          }
+        }
+      }
+    },
+    "Pay-as-you-go beyond the allowance": {
+      "extractionState": "manual",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paiement à l'usage au-delà du quota"
+          }
+        }
+      }
+    },
+    "Run vibe --setup in Terminal to read your Vibe Code usage": {
+      "extractionState": "manual",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lancez vibe --setup dans le Terminal pour lire votre usage Vibe Code"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
