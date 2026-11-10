@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The Mistral API key Mistral Vibe signs its requests with.
 ///
@@ -57,11 +58,26 @@ struct MistralVibeCredentials: Equatable {
         throw UsageProviderError.needsAuth
     }
 
+    /// The newest item across both service names — the same choice
+    /// `modifiedAt` makes, so a change it reports is the item read here.
+    ///
+    /// `-A` opens the item's access list, but an item filed through
+    /// `/usr/bin/security` still has a partition list that admits only Apple's
+    /// tools (see CONTRIBUTING), so this reads without interaction and lets
+    /// `KeychainSecret` retry a refusal through that tool rather than raise a
+    /// dialogue from a background refresh.
     static func readKeychain() -> String? {
-        for service in keychainServices {
-            if let value = KeychainItem.read(service: service, account: envKey) { return value }
-        }
-        return nil
+        guard let match = KeychainItem.newest(services: keychainServices, account: envKey) else { return nil }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecValuePersistentRef: match.persistentRef,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+        let read = KeychainSecret.read(query: query, interactive: false,
+                                       rescue: (service: match.service, account: envKey))
+        guard read.status == errSecSuccess, let data = read.data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// When the keychain item or the `.env` file last changed — read without

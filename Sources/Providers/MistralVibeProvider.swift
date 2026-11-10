@@ -17,12 +17,20 @@ actor MistralVibeProvider: UsageProvider {
 
     private let session: URLSession
     private let loadCredentials: () throws -> MistralVibeCredentials
+    private let credentialsModifiedAt: () -> Date?
+    /// An API key does not expire, so the cache never drops it on its own:
+    /// `fetchSnapshot` does, when the keychain item or `.env` file behind it
+    /// changes, and when the server refuses it.
     private let cache = CredentialCache<MistralVibeCredentials> { _ in false }
+    /// The stamp the held key was read under. `nil` before the first read.
+    private var heldStamp: Date??
 
     init(session: URLSession = .shared,
-         loadCredentials: (() throws -> MistralVibeCredentials)? = nil) {
+         loadCredentials: (() throws -> MistralVibeCredentials)? = nil,
+         credentialsModifiedAt: (() -> Date?)? = nil) {
         self.session = session
         self.loadCredentials = loadCredentials ?? { try MistralVibeCredentials.load() }
+        self.credentialsModifiedAt = credentialsModifiedAt ?? { MistralVibeCredentials.modifiedAt() }
     }
 
     nonisolated var signInRoute: SignInRoute {
@@ -30,8 +38,10 @@ actor MistralVibeProvider: UsageProvider {
                  install: URL(string: "https://github.com/mistralai/mistral-vibe"))
     }
 
+    /// Asked on every store pass and every Settings render, so a key already
+    /// in hand answers without touching the disk or the keychain.
     nonisolated func account() -> ProviderAccount? {
-        guard MistralVibeCredentials.isPresent() else { return nil }
+        guard cache.held != nil || MistralVibeCredentials.isPresent() else { return nil }
         return ProviderAccount(
             label: nil,   // an API key names no one
             plan: nil,
@@ -43,28 +53,43 @@ actor MistralVibeProvider: UsageProvider {
     nonisolated func forgetCachedCredential() { cache.forget() }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
-        let credentials = try cache.value(
-            itemModifiedAt: { MistralVibeCredentials.modifiedAt() },
-            reload: loadCredentials
-        )
+        // `vibe --setup` deletes and re-adds the keychain item, so a new key
+        // or a sign-out always moves this stamp.
+        let stamp = credentialsModifiedAt()
+        if let heldStamp, heldStamp != stamp { cache.forget() }
+        let credentials = try cache.value(itemModifiedAt: { stamp }, reload: loadCredentials)
+        heldStamp = stamp
 
         // The plan name is a nicety; the budget is the reading. Both are
         // asked at once, and only the budget's failure fails the fetch.
         async let subscriptionData = try? get(MistralVibeUsage.subscriptionEndpoint,
                                               key: credentials.apiKey)
-        let budgetData = try await get(MistralVibeUsage.budgetEndpoint, key: credentials.apiKey)
+        let budgetData: Data
+        do {
+            budgetData = try await get(MistralVibeUsage.budgetEndpoint, key: credentials.apiKey)
+        } catch UsageProviderError.needsAuth {
+            // A revoked key is wrong despite never expiring: drop it so the
+            // next fetch reads whatever Vibe holds now.
+            cache.forget()
+            heldStamp = nil
+            throw UsageProviderError.needsAuth
+        }
         Log.usage.debug("mistral vibe budget -> \(String(decoding: budgetData.prefix(400), as: UTF8.self), privacy: .public)")
         let budget = try MistralVibeUsage.budget(fromJSON: budgetData)
         let subscription = await subscriptionData.flatMap(MistralVibeUsage.subscription(fromJSON:))
 
         var window = budget.window
         // Past 100% with pay-as-you-go on, Vibe Code keeps working and bills
-        // the rest — worth saying, since the ring alone reads as "stopped".
+        // the rest. `exhausted` means "waiting for the reset", which it is
+        // not, so the ring stops at critical — Vibe's own gauge keeps its
+        // colour for the same reason — and the tooltip says why.
         if budget.paygEnabled ?? subscription?.paygEnabled ?? false {
+            let pastAllowance = (window.usedFraction ?? 0) >= 1
             window = LimitWindow(id: window.id, label: window.label,
                                  usedFraction: window.usedFraction,
                                  detail: L10n.t("Pay-as-you-go beyond the allowance"),
-                                 resetsAt: window.resetsAt, duration: window.duration)
+                                 resetsAt: window.resetsAt, duration: window.duration,
+                                 bandOverride: pastAllowance ? .critical : nil)
         }
 
         return ProviderSnapshot(
