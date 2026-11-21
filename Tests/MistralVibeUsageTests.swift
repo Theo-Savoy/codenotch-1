@@ -138,7 +138,61 @@ final class MistralVibeProviderTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MistralVibeStubProtocol.self]
         return MistralVibeProvider(session: URLSession(configuration: config),
-                                   loadCredentials: { .init(apiKey: "sk-test", source: .keychain) })
+                                   loadCredentials: { .init(apiKey: "sk-test", source: .keychain) },
+                                   credentialsModifiedAt: { nil })
+    }
+
+    private func budget(_ percent: Double, payg: Bool = false) -> Data {
+        Data(#"{"vibe_budget":{"usage_percentage":\#(percent),"initial_budget":15,"payg_enabled":\#(payg)}}"#.utf8)
+    }
+
+    func testANewKeyIsPickedUpWhenTheKeychainItemChanges() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MistralVibeStubProtocol.self]
+        var key = "sk-old"
+        var stamp = Date(timeIntervalSince1970: 1)
+        var sent: [String] = []
+        MistralVibeStubProtocol.handler = { request in
+            sent.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            return (200, self.budget(10))
+        }
+        let provider = MistralVibeProvider(session: URLSession(configuration: config),
+                                           loadCredentials: { .init(apiKey: key, source: .keychain) },
+                                           credentialsModifiedAt: { stamp })
+        _ = try await provider.fetchSnapshot()
+        key = "sk-new"
+        _ = try await provider.fetchSnapshot()   // same stamp: the held key
+        stamp = Date(timeIntervalSince1970: 2)
+        _ = try await provider.fetchSnapshot()   // `vibe --setup` rewrote the item
+        // Each fetch sends the budget and subscription reads with one key.
+        XCTAssertEqual(sent, Array(repeating: "Bearer sk-old", count: 4)
+                           + Array(repeating: "Bearer sk-new", count: 2))
+    }
+
+    func testARefusedKeyIsDroppedSoTheNextFetchRereadsIt() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MistralVibeStubProtocol.self]
+        var key = "sk-revoked"
+        MistralVibeStubProtocol.handler = { request in
+            request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-revoked"
+                ? (401, Data()) : (200, self.budget(10))
+        }
+        let provider = MistralVibeProvider(session: URLSession(configuration: config),
+                                           loadCredentials: { .init(apiKey: key, source: .keychain) },
+                                           credentialsModifiedAt: { nil })
+        do { _ = try await provider.fetchSnapshot(); XCTFail("401 should throw") } catch {}
+        key = "sk-valid"
+        let snapshot = try await provider.fetchSnapshot()
+        XCTAssertEqual(snapshot.headline?.usedFraction ?? -1, 0.10, accuracy: 1e-9)
+    }
+
+    func testPayAsYouGoPastTheAllowanceIsCriticalNotExhausted() async throws {
+        let over = try await provider { _ in (200, self.budget(112, payg: true)) }.fetchSnapshot()
+        XCTAssertEqual(over.headline?.bandOverride, .critical)
+        let under = try await provider { _ in (200, self.budget(50, payg: true)) }.fetchSnapshot()
+        XCTAssertNil(under.headline?.bandOverride)
+        let stopped = try await provider { _ in (200, self.budget(100)) }.fetchSnapshot()
+        XCTAssertNil(stopped.headline?.bandOverride)
     }
 
     func testBuildsAMonthlySnapshotWithThePlan() async throws {
